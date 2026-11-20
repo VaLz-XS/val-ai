@@ -24,7 +24,9 @@ export default function Home() {
  useEffect(()=>{try{const v=localStorage.getItem(KEY);if(v)setMessages(JSON.parse(v));}catch{}setReady(true);},[setMessages]);
  useEffect(()=>{if(ready)localStorage.setItem(KEY,JSON.stringify(messages));bottom.current?.scrollIntoView({behavior:"smooth"});},[messages,ready]);
  const busy=status!=="ready";
- const modelName=groups.flatMap(g=>g.models).find(m=>m[0]===model)?.[1]||"Claude Sonnet 4.6";
+ const modelName = (groups as { models: [string, string][] }[])
+  .flatMap((g) => g.models)
+  .find((m) => m[0] === model)?.[1] || "Claude Sonnet 4.6";
  function fresh(){if(busy)stop();setMessages([]);localStorage.removeItem(KEY);setInput("");}
  function submit(e:React.FormEvent){e.preventDefault();const text=input.trim();if(!text||busy)return;sendMessage({text});setInput("");}
  async function copy(id:string,text:string){try{await navigator.clipboard.writeText(text);setCopied(id);setTimeout(()=>setCopied(""),1300);}catch{}}
