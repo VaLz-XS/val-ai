@@ -8,11 +8,42 @@ import hljs from "highlight.js";
 import "highlight.js/styles/github-dark.css";
 import { Activity, ArrowUp, Bot, Check, ChevronDown, Code2, Copy, Cpu, Menu, MessageSquarePlus, PanelLeftClose, Plus, Sparkles, StopCircle, X, Zap } from "lucide-react";
 
-const groups = [
- {label:"OPUS",models:[["claude-opus-5-5","Claude Opus 5.5"],["claude-opus-5","Claude Opus 5"],["claude-opus-4-8","Claude Opus 4.8"],["claude-opus-4-7","Claude Opus 4.7"],["claude-opus-4-6","Claude Opus 4.6"],["claude-opus-4-5","Claude Opus 4.5"]]},
- {label:"SONNET",models:[["claude-sonnet-5-5","Claude Sonnet 5.5"],["claude-sonnet-5","Claude Sonnet 5"],["claude-sonnet-4-6","Claude Sonnet 4.6"],["claude-sonnet-4-5","Claude Sonnet 4.5"]]},
- {label:"HAIKU",models:[["claude-haiku-5-5","Claude Haiku 5.5"],["claude-haiku-4-5","Claude Haiku 4.5"]]}
-] as const;
+type ModelEntry = readonly [id: string, name: string];
+
+type ModelGroup = {
+  readonly label: string;
+  readonly models: readonly ModelEntry[];
+};
+
+const groups: readonly ModelGroup[] = [
+  {
+    label: "OPUS",
+    models: [
+      ["claude-opus-5-5", "Claude Opus 5.5"],
+      ["claude-opus-5", "Claude Opus 5"],
+      ["claude-opus-4-8", "Claude Opus 4.8"],
+      ["claude-opus-4-7", "Claude Opus 4.7"],
+      ["claude-opus-4-6", "Claude Opus 4.6"],
+      ["claude-opus-4-5", "Claude Opus 4.5"],
+    ],
+  },
+  {
+    label: "SONNET",
+    models: [
+      ["claude-sonnet-5-5", "Claude Sonnet 5.5"],
+      ["claude-sonnet-5", "Claude Sonnet 5"],
+      ["claude-sonnet-4-6", "Claude Sonnet 4.6"],
+      ["claude-sonnet-4-5", "Claude Sonnet 4.5"],
+    ],
+  },
+  {
+    label: "HAIKU",
+    models: [
+      ["claude-haiku-5-5", "Claude Haiku 5.5"],
+      ["claude-haiku-4-5", "Claude Haiku 4.5"],
+    ],
+  },
+];
 const KEY="valen-tools-chat-v1";
 
 function CodeBlock({ children }: { children: React.ReactNode }) {
@@ -67,7 +98,9 @@ export default function Home() {
  useEffect(()=>{try{const v=localStorage.getItem(KEY);if(v)setMessages(JSON.parse(v));}catch{}setReady(true);},[setMessages]);
  useEffect(()=>{if(ready)localStorage.setItem(KEY,JSON.stringify(messages));bottom.current?.scrollIntoView({behavior:"smooth"});},[messages,ready]);
  const busy=status!=="ready";
- const modelName=groups.flatMap(g=>g.models).find(m=>m[0]===model)?.[1]||"Claude Sonnet 4.6";
+ const modelName =
+  groups.flatMap((group) => group.models)
+    .find(([id]) => id === model)?.[1] ?? "Claude Sonnet 4.6";
  function fresh(){if(busy)stop();setMessages([]);localStorage.removeItem(KEY);setInput("");}
  function submit(e:React.FormEvent){e.preventDefault();const text=input.trim();if(!text||busy)return;sendMessage({text});setInput("");}
  async function copy(id:string,text:string){try{await navigator.clipboard.writeText(text);setCopied(id);setTimeout(()=>setCopied(""),1300);}catch{}}
