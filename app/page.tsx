@@ -2,7 +2,7 @@
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import hljs from "highlight.js";
@@ -53,6 +53,13 @@ const groups: readonly ModelGroup[] = [
 
 const KEY = "valen-tools-chat-v1";
 
+// FIX: components untuk markdown dibuat sekali di luar, biar gak dibuat baru tiap render
+const markdownComponents = {
+  pre: ({ children }: any) => (
+    <CodeBlock streaming={false}>{children}</CodeBlock>
+  ),
+};
+
 const CodeBlock = React.memo(function CodeBlock({
   children,
   streaming
@@ -70,25 +77,22 @@ const CodeBlock = React.memo(function CodeBlock({
   const language =
     languageClass.match(/language-([\w+#.-]+)/i)?.[1]?.toLowerCase() ?? "text";
 
-  const raw = String(
+  const raw = useMemo(() => String(
     codeNode?.props?.children ?? children ?? ""
-  ).replace(/\n$/, "");
+  ).replace(/\n$/, ""), [codeNode?.props?.children, children]);
 
-  let highlighted = raw;
-
-  // Highlight hanya setelah streaming selesai agar HP tidak berat.
-  if (!streaming && language !== "text" && hljs.getLanguage(language)) {
-    try {
-      highlighted = hljs.highlight(raw, {
-        language,
-        ignoreIllegals: true
-      }).value;
-    } catch {
-      highlighted = raw;
+  const highlighted = useMemo(() => {
+    if (!streaming && language !== "text" && hljs.getLanguage(language)) {
+      try {
+        return hljs.highlight(raw, { language, ignoreIllegals: true }).value;
+      } catch {
+        return raw;
+      }
     }
-  }
+    return raw;
+  }, [raw, language, streaming]);
 
-  async function copyCode() {
+  const copyCode = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(raw);
       setCopied(true);
@@ -96,13 +100,12 @@ const CodeBlock = React.memo(function CodeBlock({
     } catch {
       setCopied(false);
     }
-  }
+  }, [raw]);
 
   return (
     <div className="code-card">
       <div className="code-toolbar">
         <span className="code-language">{language}</span>
-
         <button
           type="button"
           className="code-copy"
@@ -113,7 +116,6 @@ const CodeBlock = React.memo(function CodeBlock({
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-
       <pre className="code-pre">
         <code
           className={`hljs${!streaming && language !== "text" ? "" : " code-plain"}`}
@@ -121,6 +123,58 @@ const CodeBlock = React.memo(function CodeBlock({
         />
       </pre>
     </div>
+  );
+});
+
+// FIX: Pisah jadi komponen sendiri + memo, biar pesan lama gak ke-render ulang pas streaming
+const MessageItem = React.memo(function MessageItem({
+  message,
+  modelName,
+  copied,
+  onCopy,
+  busy,
+}: {
+  message: any;
+  modelName: string;
+  copied: string;
+  onCopy: (id: string, text: string) => void;
+  busy: boolean;
+}) {
+  const text = useMemo(() => message.parts
+    .filter((part: any) => part.type === "text")
+    .map((part: any) => part.text)
+    .join(""), [message.parts]);
+
+  // Komponen pre yang tau status streaming pesan ini
+  const components = useMemo(() => ({
+    pre: ({ children }: any) => (
+      <CodeBlock streaming={busy && message.role === "assistant"}>{children}</CodeBlock>
+    ),
+  }), [busy, message.role]);
+
+  return (
+    <article className={`message ${message.role}`}>
+      <div className="message-avatar">
+        {message.role === "user" ? "V" : <Sparkles size={15} />}
+      </div>
+      <div className="message-content">
+        <div className="message-meta">
+          <b>{message.role === "user" ? "You" : "VALEN AI"}</b>
+          <span>{message.role === "assistant" ? modelName : "MESSAGE"}</span>
+        </div>
+        <div className="markdown">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+            {text}
+          </ReactMarkdown>
+        </div>
+        {message.role === "assistant" && text && (
+          <button className="copy-btn" onClick={() => onCopy(message.id, text)}>
+            {copied === message.id ? <Check size={13} /> : <Copy size={13} />}
+            {copied === message.id ? "Copied" : "Copy response"}
+          </button>
+        )}
+      </div>
+    </article>
   );
 });
 
@@ -132,9 +186,16 @@ export default function Home() {
   const [ready, setReady] = useState(false);
 
   const modelRef = useRef(model);
-  modelRef.current = model;
+  // FIX: Jangan tulis ref pas render, pake effect
+  useEffect(() => { modelRef.current = model; }, [model]);
 
   const bottom = useRef<HTMLDivElement>(null);
+
+  // FIX: Transport dibikin sekali aja, jangan tiap render
+  const transport = useMemo(() => new DefaultChatTransport({
+    api: "/api/chat",
+    body: () => ({ model: modelRef.current })
+  }), []);
 
   const {
     messages,
@@ -143,13 +204,9 @@ export default function Home() {
     stop,
     setMessages,
     error
-  } = useChat({
-    transport: new DefaultChatTransport({
-      api: "/api/chat",
-      body: () => ({ model: modelRef.current })
-    })
-  });
+  } = useChat({ transport });
 
+  // Load sekali di awal
   useEffect(() => {
     try {
       const saved = localStorage.getItem(KEY);
@@ -157,51 +214,50 @@ export default function Home() {
     } catch {
       // Abaikan riwayat yang rusak.
     }
-
     setReady(true);
   }, [setMessages]);
 
+  // FIX PALING PENTING: Simpan cuma pas status ready + debounce 500ms
+  // Jangan stringify tiap token streaming
   useEffect(() => {
-    if (ready) {
-      localStorage.setItem(KEY, JSON.stringify(messages));
-    }
-  }, [messages, ready]);
+    if (!ready) return;
+    if (status !== "ready") return;
 
-  // Jangan smooth-scroll pada setiap token streaming.
+    const t = window.setTimeout(() => {
+      try {
+        localStorage.setItem(KEY, JSON.stringify(messages));
+      } catch {}
+    }, 500);
+    return () => window.clearTimeout(t);
+  }, [messages, ready, status]);
+
+  // FIX: Scroll cuma pas pesan baru / status berubah, dan jangan scroll kalau user lagi scroll ke atas
   useEffect(() => {
-    bottom.current?.scrollIntoView({
-      behavior: "auto",
-      block: "end"
-    });
+    bottom.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [messages.length, status]);
 
   const busy = status !== "ready";
 
-  const modelName =
-    groups
-      .flatMap(group => group.models)
-      .find(([id]) => id === model)?.[1] ?? "Claude Sonnet 4.6";
+  const modelName = useMemo(() =>
+    groups.flatMap(group => group.models).find(([id]) => id === model)?.[1] ?? "Claude Sonnet 4.6"
+  , [model]);
 
-  function fresh() {
-    if (busy) stop();
-
+  const fresh = useCallback(() => {
+    if (status !== "ready") stop();
     setMessages([]);
     localStorage.removeItem(KEY);
     setInput("");
-  }
+  }, [status, stop, setMessages]);
 
-  function submit(e: React.FormEvent) {
+  const submit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
-
     const text = input.trim();
-
-    if (!text || busy) return;
-
+    if (!text || status !== "ready") return;
     sendMessage({ text });
     setInput("");
-  }
+  }, [input, status, sendMessage]);
 
-  async function copy(id: string, text: string) {
+  const copy = useCallback(async (id: string, text: string) => {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(id);
@@ -209,25 +265,25 @@ export default function Home() {
     } catch {
       setCopied("");
     }
-  }
+  }, []);
+
+  const onKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submit(e as any);
+    }
+  }, [submit]);
 
   return (
     <main className="shell">
       <aside className={`sidebar ${sidebar ? "open" : "closed"}`}>
         <div className="brand">
           <div className="brand-mark">V</div>
-
           <div className="brand-copy">
-            <b>
-              VALEN <i>TOOLS</i>
-            </b>
+            <b>VALEN <i>TOOLS</i></b>
             <small>PERSONAL AI WORKSPACE</small>
           </div>
-
-          <button
-            className="icon-btn mobile-only"
-            onClick={() => setSidebar(false)}
-          >
+          <button className="icon-btn mobile-only" onClick={() => setSidebar(false)}>
             <X size={18} />
           </button>
         </div>
@@ -239,7 +295,6 @@ export default function Home() {
         </button>
 
         <div className="side-label">WORKSPACE</div>
-
         <div className="side-item active">
           <Bot size={17} />
           AI Assistant
@@ -247,36 +302,19 @@ export default function Home() {
         </div>
 
         <div className="side-label">SESSION</div>
-
         <div className="session-card">
-          <div className="session-icon">
-            <MessageSquarePlus size={16} />
-          </div>
-
+          <div className="session-icon"><MessageSquarePlus size={16} /></div>
           <div>
             <b>Personal session</b>
-            <small>
-              {messages.length
-                ? `${messages.length} messages`
-                : "Ready for a new idea"}
-            </small>
+            <small>{messages.length ? `${messages.length} messages` : "Ready for a new idea"}</small>
           </div>
         </div>
 
         <div className="sidebar-bottom">
-          <div className="status-line">
-            <span className="status-dot" />
-            SYSTEM ONLINE
-          </div>
-
+          <div className="status-line"><span className="status-dot" />SYSTEM ONLINE</div>
           <div className="profile">
             <div className="avatar">V</div>
-
-            <div>
-              <b>Valen</b>
-              <small>Private workspace</small>
-            </div>
-
+            <div><b>Valen</b><small>Private workspace</small></div>
             <span className="profile-more">•••</span>
           </div>
         </div>
@@ -285,26 +323,14 @@ export default function Home() {
       <section className="main-area">
         <header className="topbar">
           <div className="top-left">
-            <button
-              className="icon-btn"
-              onClick={() => setSidebar(!sidebar)}
-            >
+            <button className="icon-btn" onClick={() => setSidebar(!sidebar)}>
               <PanelLeftClose size={18} />
             </button>
-
-            <div className="breadcrumb">
-              Workspace <span>/</span> <b>AI Assistant</b>
-            </div>
+            <div className="breadcrumb">Workspace <span>/</span> <b>AI Assistant</b></div>
           </div>
-
           <div className="top-right">
-            <div className="secure-pill">
-              <span /> PRIVATE
-            </div>
-
-            <button className="icon-btn" onClick={fresh}>
-              <MessageSquarePlus size={18} />
-            </button>
+            <div className="secure-pill"><span /> PRIVATE</div>
+            <button className="icon-btn" onClick={fresh}><MessageSquarePlus size={18} /></button>
           </div>
         </header>
 
@@ -312,39 +338,23 @@ export default function Home() {
           <div className="chat-column">
             <div className="chat-heading">
               <div>
-                <div className="eyebrow">
-                  <span className="eyebrow-line" />
-                  VALEN INTELLIGENCE
-                </div>
-
-                <h1>
-                  AI Assistant<span>.</span>
-                </h1>
-
+                <div className="eyebrow"><span className="eyebrow-line" />VALEN INTELLIGENCE</div>
+                <h1>AI Assistant<span>.</span></h1>
                 <p>Your private space to think, build, and create.</p>
               </div>
-
               <div className="model-wrap">
                 <label>ACTIVE MODEL</label>
-
                 <div className="select-box">
                   <Cpu size={15} />
-
-                  <select
-                    value={model}
-                    onChange={e => setModel(e.target.value)}
-                  >
+                  <select value={model} onChange={e => setModel(e.target.value)}>
                     {groups.map(group => (
                       <optgroup key={group.label} label={group.label}>
                         {group.models.map(item => (
-                          <option key={item[0]} value={item[0]}>
-                            {item[1]}
-                          </option>
+                          <option key={item[0]} value={item[0]}>{item[1]}</option>
                         ))}
                       </optgroup>
                     ))}
                   </select>
-
                   <ChevronDown size={14} />
                 </div>
               </div>
@@ -354,31 +364,13 @@ export default function Home() {
               {!messages.length ? (
                 <div className="welcome">
                   <div className="orb">
-                    <div className="orb-inner">
-                      <Sparkles size={27} />
-                    </div>
-
+                    <div className="orb-inner"><Sparkles size={27} /></div>
                     <span className="orb-ring ring-one" />
                     <span className="orb-ring ring-two" />
                   </div>
-
-                  <div className="welcome-kicker">
-                    <Zap size={13} />
-                    READY WHEN YOU ARE
-                  </div>
-
-                  <h2>
-                    What are we
-                    <br />
-                    <em>working on</em> today?
-                  </h2>
-
-                  <p>
-                    Ask anything, explore an idea, or turn a rough thought
-                    <br className="desktop-break" />
-                    into something real.
-                  </p>
-
+                  <div className="welcome-kicker"><Zap size={13} />READY WHEN YOU ARE</div>
+                  <h2>What are we<br /><em>working on</em> today?</h2>
+                  <p>Ask anything, explore an idea, or turn a rough thought<br className="desktop-break" />into something real.</p>
                   <div className="suggestions">
                     {[
                       ["Explain a concept", "Break down a complex topic simply."],
@@ -388,29 +380,16 @@ export default function Home() {
                       <button
                         className="suggestion"
                         key={suggestion[0]}
-                        onClick={() =>
-                          setInput([
-                            "Jelaskan konsep yang sulit dengan sederhana.",
-                            "Bantu saya membuat dan menjelaskan kode.",
-                            "Bantu saya brainstorming ide project."
-                          ][index])
-                        }
+                        onClick={() => setInput([
+                          "Jelaskan konsep yang sulit dengan sederhana.",
+                          "Bantu saya membuat dan menjelaskan kode.",
+                          "Bantu saya brainstorming ide project."
+                        ][index])}
                       >
                         <span className="suggestion-icon">
-                          {index === 0 ? (
-                            <Activity size={17} />
-                          ) : index === 1 ? (
-                            <Code2 size={17} />
-                          ) : (
-                            <Sparkles size={17} />
-                          )}
+                          {index === 0 ? <Activity size={17} /> : index === 1 ? <Code2 size={17} /> : <Sparkles size={17} />}
                         </span>
-
-                        <span>
-                          <b>{suggestion[0]}</b>
-                          <small>{suggestion[1]}</small>
-                        </span>
-
+                        <span><b>{suggestion[0]}</b><small>{suggestion[1]}</small></span>
                         <ArrowUp size={15} />
                       </button>
                     ))}
@@ -418,83 +397,19 @@ export default function Home() {
                 </div>
               ) : (
                 <div className="message-list">
-                  {messages.map(message => {
-                    const text = message.parts
-                      .filter((part: any) => part.type === "text")
-                      .map((part: any) => part.text)
-                      .join("");
-
-                    return (
-                      <article
-                        className={`message ${message.role}`}
-                        key={message.id}
-                      >
-                        <div className="message-avatar">
-                          {message.role === "user" ? (
-                            "V"
-                          ) : (
-                            <Sparkles size={15} />
-                          )}
-                        </div>
-
-                        <div className="message-content">
-                          <div className="message-meta">
-                            <b>
-                              {message.role === "user" ? "You" : "VALEN AI"}
-                            </b>
-
-                            <span>
-                              {message.role === "assistant"
-                                ? modelName
-                                : "MESSAGE"}
-                            </span>
-                          </div>
-
-                          <div className="markdown">
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm]}
-                              components={{
-                                pre: ({ children }) => (
-                                  <CodeBlock streaming={busy}>
-                                    {children}
-                                  </CodeBlock>
-                                )
-                              }}
-                            >
-                              {text}
-                            </ReactMarkdown>
-                          </div>
-
-                          {message.role === "assistant" && text && (
-                            <button
-                              className="copy-btn"
-                              onClick={() => copy(message.id, text)}
-                            >
-                              {copied === message.id ? (
-                                <Check size={13} />
-                              ) : (
-                                <Copy size={13} />
-                              )}
-
-                              {copied === message.id
-                                ? "Copied"
-                                : "Copy response"}
-                            </button>
-                          )}
-                        </div>
-                      </article>
-                    );
-                  })}
-
+                  {messages.map(message => (
+                    <MessageItem
+                      key={message.id}
+                      message={message}
+                      modelName={modelName}
+                      copied={copied}
+                      onCopy={copy}
+                      busy={busy}
+                    />
+                  ))}
                   {busy && (
-                    <div className="typing">
-                      <span />
-                      <span />
-                      <span />
-                      <small>VALEN is thinking...</small>
-                    </div>
+                    <div className="typing"><span /><span /><span /><small>VALEN is thinking...</small></div>
                   )}
-
                   <div ref={bottom} />
                 </div>
               )}
@@ -503,10 +418,7 @@ export default function Home() {
             {error && (
               <div className="error-box">
                 <b>Request failed</b>
-                <span>
-                  {error.message ||
-                    "Periksa API key dan konfigurasi VannAPI."}
-                </span>
+                <span>{error.message || "Periksa API key dan konfigurasi VannAPI."}</span>
               </div>
             )}
 
@@ -515,59 +427,32 @@ export default function Home() {
                 <textarea
                   value={input}
                   onChange={e => setInput(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      submit(e);
-                    }
-                  }}
+                  onKeyDown={onKeyDown}
                   placeholder="Message VALEN AI..."
                   rows={1}
                   disabled={busy}
                 />
-
                 <div className="composer-bottom">
                   <div className="composer-hint">
                     <span className="key">↵</span> send
                     <span className="hint-divider">·</span>
                     <span className="key">⇧ ↵</span> new line
                   </div>
-
                   {busy ? (
-                    <button
-                      type="button"
-                      className="send-btn stop"
-                      onClick={stop}
-                    >
-                      <StopCircle size={17} />
-                    </button>
+                    <button type="button" className="send-btn stop" onClick={stop}><StopCircle size={17} /></button>
                   ) : (
-                    <button
-                      type="submit"
-                      className="send-btn"
-                      disabled={!input.trim()}
-                    >
-                      <ArrowUp size={18} />
-                    </button>
+                    <button type="submit" className="send-btn" disabled={!input.trim()}><ArrowUp size={18} /></button>
                   )}
                 </div>
               </form>
-
-              <div className="disclaimer">
-                VALEN AI can make mistakes. Check important information.
-              </div>
+              <div className="disclaimer">VALEN AI can make mistakes. Check important information.</div>
             </div>
           </div>
         </div>
       </section>
 
       {!sidebar && (
-        <button
-          className="mobile-menu"
-          onClick={() => setSidebar(true)}
-        >
-          <Menu size={20} />
-        </button>
+        <button className="mobile-menu" onClick={() => setSidebar(true)}><Menu size={20} /></button>
       )}
     </main>
   );
