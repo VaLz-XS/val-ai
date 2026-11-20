@@ -16,7 +16,7 @@ export async function POST(req: Request) {
     const modelId = allowed.has(asked) ? asked : "claude-sonnet-4-6";
     if (!Array.isArray(messages) || !messages.length) return Response.json({ error: "Pesan tidak ditemukan." }, { status: 400 });
     const provider = createAnthropic({ apiKey, baseURL: "https://api.vanns.my.id/v1" });
-    const result = streamText({ model: provider(modelId), messages: await convertToModelMessages(messages), maxOutputTokens: 4096 });
+    const result = streamText({ model: provider(modelId), messages: await convertToModelMessages(messages), maxOutputTokens: 999999 });
     return result.toUIMessageStreamResponse({ onError: e => e instanceof Error ? e.message : "Gagal menghubungi VannAPI." });
   } catch (e) {
     console.error("VALEN API error:", e);
